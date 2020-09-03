@@ -43,7 +43,6 @@ class CerestimGUI(QMainWindow):
         # Connect GUI signals to slots
         _refresh_pushButton = self.findChild(QtWidgets.QPushButton, 'refresh_pushButton')
         _refresh_pushButton.clicked.connect(self.refresh_devices)
-        self._device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
 
         _connect_pushButton = self.findChild(QtWidgets.QPushButton, 'connect_pushButton')
         _connect_pushButton.clicked.connect(self.connect)
@@ -57,16 +56,22 @@ class CerestimGUI(QMainWindow):
         self.show()
 
     def refresh_devices(self):
-        self.statusBar().showMessage('TODO: refresh_devices()')
         _device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
         _device_combo.clear()
-        device_list = cerestim.BStimulator_scanForDevices()
-        _device_combo.addItem('TODO: fill with devices')
+        self.stimulator = cerestim.BStimulator()
+        result, device_tuple = self.stimulator.scanForDevices()
+        result, device_tuple = cerestim.BStimulator_scanForDevices()
+        if result == 0:
+            for dev_id in device_tuple:
+                _device_combo.addItem(str(dev_id))
 
     def connect(self):
         self.statusBar().showMessage('TODO: connect()')
+        _device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
+        curr_dev_id = int(_device_combo.currentText())
+        curr_dev_ix = None
         self.stimulator = cerestim.BStimulator()
-        # self.stimulator.selectDevice(dev_ix)
+        self.stimulator.selectDevice(curr_dev_ix)
         self.indicator.setColor('yellow')
 
     def calculate_waveform(self, params):
