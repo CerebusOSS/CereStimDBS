@@ -32,7 +32,7 @@ class CerestimGUI(QMainWindow):
 
     def __init__(self):
         super(CerestimGUI, self).__init__()
-        self.stimulator = None
+        self.stimulator = cerestim.BStimulator()
         uic.loadUi('mainwindow.ui', self)
 
         # Add indicator
@@ -58,62 +58,59 @@ class CerestimGUI(QMainWindow):
     def refresh_devices(self):
         _device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
         _device_combo.clear()
-        self.stimulator = cerestim.BStimulator()
         result, device_tuple = self.stimulator.scanForDevices()
-        result, device_tuple = cerestim.BStimulator_scanForDevices()
+        # result, device_tuple = cerestim.BStimulator_scanForDevices()
         if result == 0:
             for dev_id in device_tuple:
                 _device_combo.addItem(str(dev_id))
 
     def connect(self):
-        self.statusBar().showMessage('TODO: connect()')
         _device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
         curr_dev_id = int(_device_combo.currentText())
-        curr_dev_ix = None
-        self.stimulator = cerestim.BStimulator()
-        self.stimulator.selectDevice(curr_dev_ix)
+        curr_dev_ix = _device_combo.currentIndex()
+        self.stimulator.setDevice(curr_dev_ix)
+        self.statusBar().showMessage(f"Connected to {curr_dev_id} at index {curr_dev_ix}.")
         self.indicator.setColor('yellow')
 
     def calculate_waveform(self, params):
         waveform = None
         n_reps = 0
-        if self.stimulator is not None:
-            min_amp, max_amp = self.stimulator.getMinMaxAmplitude()
-            p1_amp = max(min(params['amp'], max_amp), min_amp)
-            min_interphase = 53  # It would be great to get this from API.
-            cycle_dur_us = 1E6 / params['frequency']
-            if params['polarity'].endswith('Mono'):
-                p2_max_width = cycle_dur_us - params['width'] - 2 * min_interphase
-                p2_amp = (params['width'] * p1_amp) / p2_max_width
-                p2_amp = max(p2_amp, min_amp)
-                p2_width = (params['width'] * p1_amp) / p2_amp
-            else:
-                p2_width = params['width']
-                p2_amp = p1_amp
+        min_amp, max_amp = self.stimulator.getMinMaxAmplitude()
+        p1_amp = max(min(params['amp'], max_amp), min_amp)
+        min_interphase = 53  # It would be great to get this from API.
+        cycle_dur_us = 1E6 / params['frequency']
+        if params['polarity'].endswith('Mono'):
+            p2_max_width = cycle_dur_us - params['width'] - 2 * min_interphase
+            p2_amp = (params['width'] * p1_amp) / p2_max_width
+            p2_amp = max(p2_amp, min_amp)
+            p2_width = (params['width'] * p1_amp) / p2_amp
+        else:
+            p2_width = params['width']
+            p2_amp = p1_amp
 
-            if params['interphase'] == 'Max Sep':
-                interphase = (cycle_dur_us - params['width'] - p2_width) / 2
-            else:
-                interphase = min_interphase
+        if params['interphase'] == 'Max Sep':
+            interphase = (cycle_dur_us - params['width'] - p2_width) / 2
+        else:
+            interphase = min_interphase
 
-            # Configure final waveform
-            n_pulses = np.ceil(params['duration'] * params['frequency'])
-            if n_pulses > 255:
-                n_reps = np.ceil(n_pulses / 255)
-                n_pulses = 255
-            else:
-                n_reps = 1
-            """
-            waveform = {...
-                'polarity', int16(stim_params.is_ana),...
-                'pulses', n_pulses,...
-                'amp1', stim_params.p1_amp,...
-                'amp2', p2_amp,...
-                'width1', stim_params.p1_width,...
-                'width2', p2_width,...
-                'interphase', interphase,...
-                'frequency', stim_params.freq};
-            """
+        # Configure final waveform
+        n_pulses = np.ceil(params['duration'] * params['frequency'])
+        if n_pulses > 255:
+            n_reps = np.ceil(n_pulses / 255)
+            n_pulses = 255
+        else:
+            n_reps = 1
+        """
+        waveform = {...
+            'polarity', int16(stim_params.is_ana),...
+            'pulses', n_pulses,...
+            'amp1', stim_params.p1_amp,...
+            'amp2', p2_amp,...
+            'width1', stim_params.p1_width,...
+            'width2', p2_width,...
+            'interphase', interphase,...
+            'frequency', stim_params.freq};
+        """
         return waveform, n_reps
 
     def generate(self):

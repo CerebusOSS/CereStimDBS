@@ -51,4 +51,10 @@ compile_commands.json
 # QtCreator local machine specific files for imported projects
 *creator.user*
 
+# JetBrains
 .idea/
+
+# Visual Studio
+.vs/
+CMakeSettings.json
+out/
