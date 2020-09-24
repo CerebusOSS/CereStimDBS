@@ -73,9 +73,23 @@ class CerestimGUI(QMainWindow):
         self.indicator.setColor('yellow')
 
     def calculate_waveform(self, params):
+        """
+        The CereStim is capable of storing 16 different waveform patterns, with ids: BCONFIG_0 ... BCONFIG_15
+        Each pattern is set with configureStimulusPattern(configID: 'BConfig', afcf: 'BWFType', pulses: 'UINT8',
+                                                        amp1: 'UINT16', amp2: 'UINT16', width1: 'UINT16',
+                                                        width2: 'UINT16', frequency: 'UINT32', interphase: 'UINT16')
+            where BWFType is an enum: anodic_first=0, cathodic_first, invalid
+
+        :param params:
+        :return:
+        """
         waveform = None
         n_reps = 0
-        min_amp, max_amp = self.stimulator.getMinMaxAmplitude()
+        #max_min = self.stimulator.getMinMaxAmplitude()
+        #max_amp, min_amp = max_min >> 16, max_min & 0x0F
+        # matlab returns the following:
+        max_amp, min_amp = 16960, 100
+        min_amp = 1  # Just to test
         p1_amp = max(min(params['amp'], max_amp), min_amp)
         min_interphase = 53  # It would be great to get this from API.
         cycle_dur_us = 1E6 / params['frequency']
