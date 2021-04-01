@@ -5,6 +5,7 @@ import qtpy
 from qtpy import uic, QtGui, QtWidgets
 from qtpy.QtWidgets import QApplication, QMainWindow, QWidget
 from qtpy.QtCore import Qt, QTimer
+import pyqtgraph as pg
 import cerestim
 
 
@@ -34,11 +35,19 @@ class CerestimGUI(QMainWindow):
         super(CerestimGUI, self).__init__()
         self.stimulator = cerestim.BStimulator()
         uic.loadUi('mainwindow.ui', self)
+        self._connected = False
+        self._generated = False
 
         # Add indicator
         status_layout = self.findChild(QtWidgets.QVBoxLayout, 'status_verticalLayout')
         self.indicator = StatusIndicator()
         status_layout.addWidget(self.indicator)
+
+        # Add plot widget
+        plot_widget = self.findChild(QtWidgets.QWidget, "plot_widget")
+        plot_widget.setLayout(QtWidgets.QHBoxLayout())
+        self._pg = pg.GraphicsLayoutWidget(show=True, title="Pulse Waveform")
+        plot_widget.layout().addWidget(self._pg)
 
         # Connect GUI signals to slots
         _refresh_pushButton = self.findChild(QtWidgets.QPushButton, 'refresh_pushButton')
@@ -53,7 +62,44 @@ class CerestimGUI(QMainWindow):
         _start_pushButton = self.findChild(QtWidgets.QPushButton, 'start_pushButton')
         _start_pushButton.clicked.connect(self.start)
 
+        for spinboxstr in ['dur_doubleSpinBox', 'width_spinBox', 'ramp_doubleSpinBox', 'freq_spinBox',
+                           'amp_spinBox', 'elec_spinBox']:
+            sb = self.findChild(QtWidgets.QAbstractSpinBox, spinboxstr)
+            sb.valueChanged.connect(self.handle_value_changed)
+
+        # self.timer = QTimer()
+        # self.timer.timeout.connect(self.update_status)
+        # self.timer.start(500)
+
         self.show()
+
+    def get_status(self) -> str:
+        _status = cerestim.BSequenceStatus()
+        self.stimulator.readSequenceStatus(_status)
+        state = {0: 'stopped', 1: 'paused', 2: 'playing', 3: 'writing', 4: 'waiting'}[_status.status]
+        return state
+
+    def update_status(self):
+        if not self._connected:
+            self.indicator.setColor('red')
+            return
+        start_pb = self.findChild(QtWidgets.QPushButton, "start_pushButton")
+        start_pb.setText("Start")
+        status = self.get_status()
+        if status == 'playing':
+            self.indicator.setColor('green')
+            start_pb.setEnabled(True)
+            start_pb.setText("Stop")
+        elif self._generated:
+            start_pb.setEnabled(True)
+            self.indicator.setColor('blue')
+        else:
+            start_pb.setEnabled(False)
+            self.indicator.setColor('yellow')
+
+    def handle_value_changed(self, value):
+        self._generated = False
+        self.update_status()
 
     def refresh_devices(self):
         _device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
@@ -68,11 +114,25 @@ class CerestimGUI(QMainWindow):
         _device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
         curr_dev_id = int(_device_combo.currentText())
         curr_dev_ix = _device_combo.currentIndex()
-        self.stimulator.setDevice(curr_dev_ix)
+        res = self.stimulator.setDevice(curr_dev_ix)
+        self._connected = res == cerestim.BSUCCESS
         self.statusBar().showMessage(f"Connected to {curr_dev_id} at index {curr_dev_ix}.")
-        self.indicator.setColor('yellow')
+        self.update_status()
+        min_freq = self.stimulator.getMinHardFrequency()
+        max_freq = self.stimulator.getMaxHardFrequency()
+        self._freq_lim = (min_freq, max_freq)
+        self._max_width = self.stimulator.getMaxHardWidth()
+        self._max_interphase = self.stimulator.getMaxHardInterphase()
 
-    def calculate_waveform(self, params):
+    def _stim_min_max(self):
+        # Would love to get these from the device:
+        # stim_min_max = self.stimulator.getMinMaxAmplitude()
+        # max_amp, min_amp = stim_min_max >> 12, stim_min_max & 0x0F
+        # Bt it doesn't seem to return the correct values. Use Matlab's:
+        max_amp, min_amp = 16960, 100
+        return min_amp, max_amp
+
+    def calculate_waveform(self, params: dict):
         """
         The CereStim is capable of storing 16 different waveform patterns, with ids: BCONFIG_0 ... BCONFIG_15
         Each pattern is set with configureStimulusPattern(configID: 'BConfig', afcf: 'BWFType', pulses: 'UINT8',
@@ -81,17 +141,13 @@ class CerestimGUI(QMainWindow):
             where BWFType is an enum: anodic_first=0, cathodic_first, invalid
 
         :param params:
-        :return:
+        :return: waveform, n_reps
         """
-        waveform = None
-        n_reps = 0
-        #max_min = self.stimulator.getMinMaxAmplitude()
-        #max_amp, min_amp = max_min >> 16, max_min & 0x0F
-        # matlab returns the following:
-        max_amp, min_amp = 16960, 100
-        min_amp = 1  # Just to test
-        p1_amp = max(min(params['amp'], max_amp), min_amp)
+        # Get variables from device
         min_interphase = 53  # It would be great to get this from API.
+        min_amp, max_amp = self._stim_min_max()
+        p1_amp = max(min(params['amp'], max_amp), min_amp)
+
         cycle_dur_us = 1E6 / params['frequency']
         if params['polarity'].endswith('Mono'):
             p2_max_width = cycle_dur_us - params['width'] - 2 * min_interphase
@@ -110,95 +166,90 @@ class CerestimGUI(QMainWindow):
         # Configure final waveform
         n_pulses = np.ceil(params['duration'] * params['frequency'])
         if n_pulses > 255:
-            n_reps = np.ceil(n_pulses / 255)
+            n_reps = int(np.ceil(n_pulses / 255))
             n_pulses = 255
         else:
             n_reps = 1
-        """
-        waveform = {...
-            'polarity', int16(stim_params.is_ana),...
-            'pulses', n_pulses,...
-            'amp1', stim_params.p1_amp,...
-            'amp2', p2_amp,...
-            'width1', stim_params.p1_width,...
-            'width2', p2_width,...
-            'interphase', interphase,...
-            'frequency', stim_params.freq};
-        """
+
+        is_ana = params['polarity'].lower().startswith('ana')
+        waveform = {
+            'afcf': cerestim.BWF_ANODIC_FIRST if is_ana else cerestim.BWF_CATHODIC_FIRST,
+            'pulses': n_pulses,
+            'amp1': params['amp'],
+            'amp2': p2_amp,
+            'width1': params['width'],
+            'width2': p2_width,
+            'frequency': params['frequency'],
+            'interphase': interphase,
+        }
         return waveform, n_reps
 
     def generate(self):
-        self.statusBar().showMessage('TODO: generate()')
+        self.statusBar().showMessage('Generating...')
+
+        # Pull the stimulus parameters from the GUI widgets
         stim_params = {
             'polarity': self.findChild(QtWidgets.QComboBox, 'polarity_comboBox').currentText(),
             'duration': self.findChild(QtWidgets.QDoubleSpinBox, 'dur_doubleSpinBox').value(),
-            'ramp': self.findChild(QtWidgets.QDoubleSpinBox, 'ramp_doubleSpinBox').value(),
             'amp': self.findChild(QtWidgets.QSpinBox, 'amp_spinBox').value(),
             'interphase': self.findChild(QtWidgets.QComboBox, 'interphase_comboBox').currentText(),
             'width': self.findChild(QtWidgets.QSpinBox, 'width_spinBox').value(),
-            'frequency': self.findChild(QtWidgets.QDoubleSpinBox, 'freq_doubleSpinBox').value(),
+            'frequency': self.findChild(QtWidgets.QSpinBox, 'freq_spinBox').value(),
             'electrode': self.findChild(QtWidgets.QSpinBox, 'elec_spinBox').value(),
         }
+
+        # Create the final stimulus waveform and store it in the device in configID 15 (the last one).
         final_waveform, n_final_stims = self.calculate_waveform(stim_params)
         if final_waveform is not None and n_final_stims > 0:
-            self.stimulator.setStimPattern('waveform', 15, final_waveform)
-        """
-            
-            % Calculate ramp and add in waveform positions 1-14
-            ramp_wfs = cell(0, 2);
-            if app.RampDursEditField.Value > 0
-                ramp_params = stim_params;
-                ramp_params.dur = app.RampDursEditField.Value / 14;
-                ramp_amps = round(linspace(min_amp, p1_amp, 15));
-                ramp_wfs = cell(14, 2);
-                for ramp_ix = 1:14
-                    ramp_params.p1_amp = ramp_amps(ramp_ix);
-                    [ramp_wfs{ramp_ix,1}, ramp_wfs{ramp_ix,2}] =...
-                        app.calc_waveform(ramp_params);
-                    app.stimulator.setStimPattern(...
-                        'waveform', ramp_ix,...
-                        ramp_wfs{ramp_ix,1}{:});
-                end
-            end
-            % Add waveforms x reps to stimulator program.
-            app.stimulator.beginSequence();
-            % Add ramp stims
-            for ramp_ix = 1:size(ramp_wfs, 1)
-                for stim_ix = 1:ramp_wfs{ramp_ix, 2}
-                    app.stimulator.autoStim(stim_params.elec, ramp_ix);
-                end
-            end
-            % Add final-amp stims
-            for final_ix = 1:n_final_stims
-                app.stimulator.autoStim(stim_params.elec, 15);
-            end
-            app.stimulator.endSequence();
-            
-            app.StartButton.Enable = 'on';
-            app.StatusLamp.Color = 'blue';
-            
-            delete(app.stim_timer);
-            app.stim_timer = timer('StopFcn', @app.timer_callback,...
-                'TimerFcn', @app.timer_callback,...
-                'StartDelay', app.FinalDursEditField.Value);
-        """
-        self.indicator.setColor('blue')
+            res = self.stimulator.configureStimulusPattern(configID=15, **final_waveform)
+            if res == cerestim.BDISCONNECTED:
+                self.statusBar().showMessage("Could not start configure stimulus pattern -- disconnected!")
+                return
+
+        # Program the ramp waveforms
+        ramp_dur = self.findChild(QtWidgets.QDoubleSpinBox, 'ramp_doubleSpinBox').value()
+        ramp_wf_reps = []
+        if ramp_dur > 0:
+            min_amp, max_amp = self._stim_min_max()
+            ramp_params = stim_params.copy()
+            ramp_params['duration'] = ramp_dur / 14
+            ramp_amps = np.round(np.linspace(min_amp, stim_params['amp'], 15))
+            for ramp_ix, ramp_amp in enumerate(ramp_amps):
+                ramp_params['amp'] = ramp_amp
+                ramp_wf, n_ramp_reps = self.calculate_waveform(ramp_params)
+                self.stimulator.configureStimulusPattern(configID=ramp_ix+1, **ramp_wf)
+                ramp_wf_reps.append(n_ramp_reps)
+
+        # Set waveforms x reps in the stimulator sequences
+        self.stimulator.beginningOfSequence()
+        for ramp_ix, ramp_reps in enumerate(ramp_wf_reps):
+            for rep_ix in range(ramp_reps):
+                self.stimulator.autoStimulus(stim_params['electrode'], ramp_ix + 1)
+        for _ in range(n_final_stims):
+            self.stimulator.autoStimulus(stim_params['electrode'], 15)
+        self.stimulator.endOfSequence()
+
+        self._generated = True
+        self.statusBar().showMessage(f"Generated sequence.")
+        self.update_status()
 
     def start(self):
         # For safety: Always stop first, even if we intend to start.
         if self.stimulator is not None:
+            res = self.stimulator.stop()
+            if res != cerestim.BSUCCESS:
+                self.statusBar().showMessage(f"Stop unsuccessful!")
+
+        status = self.get_status()
+        if status == 'stopped':
+            res = self.stimulator.play(1)
+            if res == cerestim.BSUCCESS:
+                self.statusBar().showMessage(f"Now stimulating")
+            elif res == cerestim.BDISCONNECTED:
+                self.statusBar().showMessage("Could not start stimulation -- disconnected!")
+        else:
             self.stimulator.stop()
-
-        if self.indicator.color == 'blue':
-            self.statusBar().showMessage('TODO: start()::start')
-            # self.stimulator.play(1)
-            self.indicator.setColor('green')
-
-        elif self.indicator.color == 'green':
-            self.statusBar().showMessage('TODO: start()::stop')
-            self.indicator.setColor('blue')
-            # stop(self.stim_timer)  # Cancel timer, change lamp to blue.
-            # delete(self.stim_timer)
+        self.update_status()
 
 
 def main():
