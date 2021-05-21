@@ -73,9 +73,17 @@ class CerestimGUI(QMainWindow):
 
         self.show()
 
+    def handle_bresult(self, res, expect_disconnected=False, caller=''):
+        if res == cerestim.BSUCCESS:
+            return
+        if res == cerestim.BDISCONNECTED and not expect_disconnected:
+            raise ConnectionError("Cerestim is disconnected.")
+        print("Caller {caller} was not successful. Result: {res}")  # TODO: Strings for each known result.
+
     def get_status(self) -> str:
         _status = cerestim.BSequenceStatus()
-        self.stimulator.readSequenceStatus(_status)
+        res = self.stimulator.readSequenceStatus(_status)
+        self.handle_bresult(res, caller='get_status::readSequenceStatus')
         state = {0: 'stopped', 1: 'paused', 2: 'playing', 3: 'writing', 4: 'waiting'}[_status.status]
         return state
 
@@ -93,6 +101,26 @@ class CerestimGUI(QMainWindow):
         elif self._generated:
             start_pb.setEnabled(True)
             self.indicator.setColor('blue')
+
+            stim_pattern = cerestim.BStimulusConfiguration()
+            self.stimulator.readStimulusPattern(stim_pattern, 15)
+            xy = [(0, 0), (0, stim_pattern.amp1), (stim_pattern.width1, stim_pattern.amp1), (stim_pattern.width1, 0),
+                  (stim_pattern.width1 + stim_pattern.interphase, 0),
+                  (stim_pattern.width1 + stim_pattern.interphase, -stim_pattern.amp2),
+                  (stim_pattern.width1 + stim_pattern.interphase + stim_pattern.width2, -stim_pattern.amp2),
+                  (stim_pattern.width1 + stim_pattern.interphase + stim_pattern.width2, 0),
+                  (stim_pattern.width1 + stim_pattern.interphase + stim_pattern.width2 + 1e6/stim_pattern.frequency, 0)]
+            xy = np.array(xy)
+            if stim_pattern.anodicFirst != 1:  # When this value is 1, it is CathodicFirst. 0 is anodicFirst. Confusing.
+                xy[:, 1] *= -1.0
+            p1 = self._pg.getItem(0, 0)
+            if not p1:
+                p1 = self._pg.addPlot(row=0, col=0)
+                p1.plot(x=xy[:, 0], y=xy[:, 1])
+            else:
+                pdi = p1.items[0]
+                pdi.setData(xy)
+
         else:
             start_pb.setEnabled(False)
             self.indicator.setColor('yellow')
@@ -104,9 +132,8 @@ class CerestimGUI(QMainWindow):
     def refresh_devices(self):
         _device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
         _device_combo.clear()
-        result, device_tuple = self.stimulator.scanForDevices()
-        # result, device_tuple = cerestim.BStimulator_scanForDevices()
-        if result == 0:
+        result, device_tuple = cerestim.BStimulator_scanForDevices()
+        if result == cerestim.BSUCCESS:
             for dev_id in device_tuple:
                 _device_combo.addItem(str(dev_id))
 
@@ -114,9 +141,19 @@ class CerestimGUI(QMainWindow):
         _device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
         curr_dev_id = int(_device_combo.currentText())
         curr_dev_ix = _device_combo.currentIndex()
+        self.stimulator = cerestim.BStimulator()
         res = self.stimulator.setDevice(curr_dev_ix)
+        self.handle_bresult(res, caller='connect::setDevice')
+
+        usbParams = cerestim.BUsbParams()
+        usbParams.timeout = 1000  # msec
+        usbParams.pid = cerestim.PN7655
+        res = self.stimulator.connect(cerestim.BINTERFACE_DEFAULT, usbParams)
+        self.handle_bresult(res, caller='connect::connect')
+
         self._connected = res == cerestim.BSUCCESS
         self.statusBar().showMessage(f"Connected to {curr_dev_id} at index {curr_dev_ix}.")
+
         self.update_status()
         min_freq = self.stimulator.getMinHardFrequency()
         max_freq = self.stimulator.getMaxHardFrequency()
@@ -128,6 +165,7 @@ class CerestimGUI(QMainWindow):
         # Would love to get these from the device:
         # stim_min_max = self.stimulator.getMinMaxAmplitude()
         # max_amp, min_amp = stim_min_max >> 12, stim_min_max & 0x0F
+        # print("max,min:", max_amp, min_amp)  # 271360, 4 !?
         # Bt it doesn't seem to return the correct values. Use Matlab's:
         max_amp, min_amp = 16960, 100
         return min_amp, max_amp
@@ -159,7 +197,7 @@ class CerestimGUI(QMainWindow):
             p2_amp = p1_amp
 
         if params['interphase'] == 'Max Sep':
-            interphase = (cycle_dur_us - params['width'] - p2_width) / 2
+            interphase = int(np.floor((cycle_dur_us - params['width'] - p2_width) / 2))
         else:
             interphase = min_interphase
 
@@ -171,7 +209,7 @@ class CerestimGUI(QMainWindow):
         else:
             n_reps = 1
 
-        is_ana = params['polarity'].lower().startswith('ana')
+        is_ana = params['polarity'].lower().startswith('an')
         waveform = {
             'afcf': cerestim.BWF_ANODIC_FIRST if is_ana else cerestim.BWF_CATHODIC_FIRST,
             'pulses': n_pulses,
@@ -198,14 +236,6 @@ class CerestimGUI(QMainWindow):
             'electrode': self.findChild(QtWidgets.QSpinBox, 'elec_spinBox').value(),
         }
 
-        # Create the final stimulus waveform and store it in the device in configID 15 (the last one).
-        final_waveform, n_final_stims = self.calculate_waveform(stim_params)
-        if final_waveform is not None and n_final_stims > 0:
-            res = self.stimulator.configureStimulusPattern(configID=15, **final_waveform)
-            if res == cerestim.BDISCONNECTED:
-                self.statusBar().showMessage("Could not start configure stimulus pattern -- disconnected!")
-                return
-
         # Program the ramp waveforms
         ramp_dur = self.findChild(QtWidgets.QDoubleSpinBox, 'ramp_doubleSpinBox').value()
         ramp_wf_reps = []
@@ -217,8 +247,15 @@ class CerestimGUI(QMainWindow):
             for ramp_ix, ramp_amp in enumerate(ramp_amps):
                 ramp_params['amp'] = ramp_amp
                 ramp_wf, n_ramp_reps = self.calculate_waveform(ramp_params)
-                self.stimulator.configureStimulusPattern(configID=ramp_ix+1, **ramp_wf)
+                res = self.stimulator.configureStimulusPattern(configID=ramp_ix+1, **ramp_wf)
+                self.handle_bresult(res, caller='generate::configureStimulusPattern')
                 ramp_wf_reps.append(n_ramp_reps)
+
+        # Create the final stimulus waveform and store it in the device in configID 15 (the last one).
+        final_waveform, n_final_stims = self.calculate_waveform(stim_params)
+        if final_waveform is not None and n_final_stims > 0:
+            res = self.stimulator.configureStimulusPattern(configID=15, **final_waveform)
+            self.handle_bresult(res, caller='generate::configureStimulusPattern')
 
         # Set waveforms x reps in the stimulator sequences
         self.stimulator.beginningOfSequence()
@@ -234,21 +271,20 @@ class CerestimGUI(QMainWindow):
         self.update_status()
 
     def start(self):
+        status = self.get_status()
+
         # For safety: Always stop first, even if we intend to start.
         if self.stimulator is not None:
             res = self.stimulator.stop()
-            if res != cerestim.BSUCCESS:
-                self.statusBar().showMessage(f"Stop unsuccessful!")
+            self.handle_bresult(res, caller="start::stop")
+            self.statusBar().showMessage(f"Stopped")
 
-        status = self.get_status()
         if status == 'stopped':
             res = self.stimulator.play(1)
+            self.handle_bresult(res, caller="start::play")
             if res == cerestim.BSUCCESS:
                 self.statusBar().showMessage(f"Now stimulating")
-            elif res == cerestim.BDISCONNECTED:
-                self.statusBar().showMessage("Could not start stimulation -- disconnected!")
-        else:
-            self.stimulator.stop()
+
         self.update_status()
 
 
