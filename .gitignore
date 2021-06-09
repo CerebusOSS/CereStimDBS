@@ -58,3 +58,8 @@ compile_commands.json
 .vs/
 CMakeSettings.json
 out/
+
+# Python build products
+build/
+dist/
+*.egg-info/
