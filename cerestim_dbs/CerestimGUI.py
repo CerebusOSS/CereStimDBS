@@ -1,5 +1,4 @@
 import sys
-import os
 import numpy as np
 import qtpy
 from qtpy import uic, QtGui, QtWidgets
@@ -67,18 +66,31 @@ class CerestimGUI(QMainWindow):
             sb = self.findChild(QtWidgets.QAbstractSpinBox, spinboxstr)
             sb.valueChanged.connect(self.handle_value_changed)
 
-        # self.timer = QTimer()
-        # self.timer.timeout.connect(self.update_status)
-        # self.timer.start(500)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_status)
+        self.timer.start(500)
 
         self.show()
 
+    def closeEvent(self, event):
+        if self._connected:
+            self.stimulator.disconnect()
+        event.accept()
+
     def handle_bresult(self, res, expect_disconnected=False, caller=''):
         if res == cerestim.BSUCCESS:
-            return
+            return 0
         if res == cerestim.BDISCONNECTED and not expect_disconnected:
             raise ConnectionError("Cerestim is disconnected.")
-        print("Caller {caller} was not successful. Result: {res}")  # TODO: Strings for each known result.
+        res_str = str(res)
+        if res == cerestim.BINVALIDFREQUENCY:
+            res_str = "Invalid Frequency"
+        elif res == cerestim.BPHASEGREATMAX:
+            res_str = "Amplitude too high"
+        msg = f"Caller {caller} was not successful. Result: {res_str}"  # TODO: Strings for each known result.
+        print(msg)
+        self.statusBar().showMessage(msg)
+        return res
 
     def get_status(self) -> str:
         _status = cerestim.BSequenceStatus()
@@ -86,6 +98,28 @@ class CerestimGUI(QMainWindow):
         self.handle_bresult(res, caller='get_status::readSequenceStatus')
         state = {0: 'stopped', 1: 'paused', 2: 'playing', 3: 'writing', 4: 'waiting'}[_status.status]
         return state
+
+    def update_graph(self):
+        stim_pattern = cerestim.BStimulusConfiguration()
+        self.stimulator.readStimulusPattern(stim_pattern, 15)
+        xy = [(0, 0), (0, stim_pattern.amp1), (stim_pattern.width1, stim_pattern.amp1), (stim_pattern.width1, 0),
+              (stim_pattern.width1 + stim_pattern.interphase, 0),
+              (stim_pattern.width1 + stim_pattern.interphase, -stim_pattern.amp2),
+              (stim_pattern.width1 + stim_pattern.interphase + stim_pattern.width2, -stim_pattern.amp2),
+              (stim_pattern.width1 + stim_pattern.interphase + stim_pattern.width2, 0),
+              (1e6 / stim_pattern.frequency, 0)]
+        xy = np.array(xy)
+        if stim_pattern.anodicFirst == 1:  # When this value is 1, it is CathodicFirst. 0 is anodicFirst. Confusing.
+            xy[:, 1] *= -1.0
+        p1 = self._pg.getItem(0, 0)
+        if not p1:
+            p1 = self._pg.addPlot(row=0, col=0)
+            p1.plot(x=xy[:, 0], y=xy[:, 1])
+            p1.setLabel('bottom', text='Time (μs)')
+            p1.setLabel('left', text='Stim. (μA)')
+        else:
+            pdi = p1.items[0]
+            pdi.setData(xy)
 
     def update_status(self):
         if not self._connected:
@@ -98,32 +132,15 @@ class CerestimGUI(QMainWindow):
             self.indicator.setColor('green')
             start_pb.setEnabled(True)
             start_pb.setText("Stop")
+            self.statusBar().showMessage(f"Now stimulating...")
         elif self._generated:
             start_pb.setEnabled(True)
             self.indicator.setColor('blue')
-
-            stim_pattern = cerestim.BStimulusConfiguration()
-            self.stimulator.readStimulusPattern(stim_pattern, 15)
-            xy = [(0, 0), (0, stim_pattern.amp1), (stim_pattern.width1, stim_pattern.amp1), (stim_pattern.width1, 0),
-                  (stim_pattern.width1 + stim_pattern.interphase, 0),
-                  (stim_pattern.width1 + stim_pattern.interphase, -stim_pattern.amp2),
-                  (stim_pattern.width1 + stim_pattern.interphase + stim_pattern.width2, -stim_pattern.amp2),
-                  (stim_pattern.width1 + stim_pattern.interphase + stim_pattern.width2, 0),
-                  (stim_pattern.width1 + stim_pattern.interphase + stim_pattern.width2 + 1e6/stim_pattern.frequency, 0)]
-            xy = np.array(xy)
-            if stim_pattern.anodicFirst != 1:  # When this value is 1, it is CathodicFirst. 0 is anodicFirst. Confusing.
-                xy[:, 1] *= -1.0
-            p1 = self._pg.getItem(0, 0)
-            if not p1:
-                p1 = self._pg.addPlot(row=0, col=0)
-                p1.plot(x=xy[:, 0], y=xy[:, 1])
-            else:
-                pdi = p1.items[0]
-                pdi.setData(xy)
-
+            self.statusBar().showMessage(f"Waiting.")
         else:
             start_pb.setEnabled(False)
             self.indicator.setColor('yellow')
+            self.statusBar().showMessage(f"Settings changed. Please Generate.")
 
     def handle_value_changed(self, value):
         self._generated = False
@@ -190,8 +207,8 @@ class CerestimGUI(QMainWindow):
         if params['polarity'].endswith('Mono'):
             p2_max_width = cycle_dur_us - params['width'] - 2 * min_interphase
             p2_amp = (params['width'] * p1_amp) / p2_max_width
-            p2_amp = max(p2_amp, min_amp)
-            p2_width = (params['width'] * p1_amp) / p2_amp
+            p2_amp = int(max(p2_amp, min_amp))
+            p2_width = int((params['width'] * p1_amp) / p2_amp)
         else:
             p2_width = params['width']
             p2_amp = p1_amp
@@ -209,9 +226,9 @@ class CerestimGUI(QMainWindow):
         else:
             n_reps = 1
 
-        is_ana = params['polarity'].lower().startswith('an')
+        is_ano = params['polarity'].lower().startswith('an')
         waveform = {
-            'afcf': cerestim.BWF_ANODIC_FIRST if is_ana else cerestim.BWF_CATHODIC_FIRST,
+            'afcf': cerestim.BWF_ANODIC_FIRST if is_ano else cerestim.BWF_CATHODIC_FIRST,
             'pulses': n_pulses,
             'amp1': params['amp'],
             'amp2': p2_amp,
@@ -255,7 +272,8 @@ class CerestimGUI(QMainWindow):
         final_waveform, n_final_stims = self.calculate_waveform(stim_params)
         if final_waveform is not None and n_final_stims > 0:
             res = self.stimulator.configureStimulusPattern(configID=15, **final_waveform)
-            self.handle_bresult(res, caller='generate::configureStimulusPattern')
+            if self.handle_bresult(res, caller='generate::configureStimulusPattern'):
+                return
 
         # Set waveforms x reps in the stimulator sequences
         self.stimulator.beginningOfSequence()
@@ -267,6 +285,7 @@ class CerestimGUI(QMainWindow):
         self.stimulator.endOfSequence()
 
         self._generated = True
+        self.update_graph()
         self.statusBar().showMessage(f"Generated sequence.")
         self.update_status()
 
