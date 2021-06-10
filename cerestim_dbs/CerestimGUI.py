@@ -219,7 +219,7 @@ class CerestimGUI(QMainWindow):
             interphase = min_interphase
 
         # Configure final waveform
-        n_pulses = np.ceil(params['duration'] * params['frequency'])
+        n_pulses = int(np.ceil(params['duration'] * params['frequency']))
         if n_pulses > 255:
             n_reps = int(np.ceil(n_pulses / 255))
             n_pulses = 255
@@ -262,7 +262,7 @@ class CerestimGUI(QMainWindow):
             ramp_params['duration'] = ramp_dur / 14
             ramp_amps = np.round(np.linspace(min_amp, stim_params['amp'], 15))
             for ramp_ix, ramp_amp in enumerate(ramp_amps):
-                ramp_params['amp'] = ramp_amp
+                ramp_params['amp'] = int(ramp_amp)
                 ramp_wf, n_ramp_reps = self.calculate_waveform(ramp_params)
                 res = self.stimulator.configureStimulusPattern(configID=ramp_ix+1, **ramp_wf)
                 self.handle_bresult(res, caller='generate::configureStimulusPattern')
