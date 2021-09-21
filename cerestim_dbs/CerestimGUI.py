@@ -92,7 +92,10 @@ class CerestimGUI(QMainWindow):
         self.statusBar().showMessage(msg)
         return res
 
-    def get_status(self) -> str:
+    def get_status(self, shortcut=False) -> str:
+        if shortcut and self.findChild(QtWidgets.QPushButton, "start_pushButton").text() == "Stop":
+            return 'playing'
+
         _status = cerestim.BSequenceStatus()
         res = self.stimulator.readSequenceStatus(_status)
         self.handle_bresult(res, caller='get_status::readSequenceStatus')
@@ -290,7 +293,7 @@ class CerestimGUI(QMainWindow):
         self.update_status()
 
     def start(self):
-        status = self.get_status()
+        status = self.get_status(shortcut=True)
 
         # For safety: Always stop first, even if we intend to start.
         if self.stimulator is not None:
