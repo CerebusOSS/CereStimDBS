@@ -1,3 +1,4 @@
+from pathlib import Path
 import sys
 import numpy as np
 import qtpy
@@ -33,7 +34,7 @@ class CerestimGUI(QMainWindow):
     def __init__(self):
         super(CerestimGUI, self).__init__()
         self.stimulator = cerestim.BStimulator()
-        uic.loadUi('mainwindow.ui', self)
+        uic.loadUi(Path(__file__).parent / "mainwindow.ui", self)
         self._connected = False
         self._generated = False
 
