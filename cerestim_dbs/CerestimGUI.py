@@ -153,7 +153,7 @@ class CerestimGUI(QMainWindow):
     def refresh_devices(self):
         _device_combo = self.findChild(QtWidgets.QComboBox, 'device_comboBox')
         _device_combo.clear()
-        result, device_tuple = cerestim.BStimulator_scanForDevices()
+        result, device_tuple = cerestim.BStimulator.scanForDevices()
         if result == cerestim.BSUCCESS:
             for dev_id in device_tuple:
                 _device_combo.addItem(str(dev_id))
